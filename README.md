@@ -4,6 +4,9 @@ Active replication using the existing Python/WebSocket application. This reposit
 contains the replica, the new GFD, tests, and the launch helper. Keep the `server`,
 `client`, and `LFD` repositories in sibling folders.
 
+For first-time GitHub cloning, messages to send teammates, and the exact rehearsal
+sequence, follow [the step-by-step demo guide](DEMO_GUIDE.md).
+
 ## Quick start
 
 From the folder containing those three folders, with Python 3.10 or newer:
