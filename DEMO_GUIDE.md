@@ -1,7 +1,7 @@
 # Milestone 2: GitHub setup and team rehearsal
 
 Use the `milestone-2` branch in **all three repositories**. The default branch,
-`master`, still contains Milestone 1. No ZIP is needed for this workflow.
+`master`, still contains Milestone 1. 
 
 The implementation and local fault-injection tests are complete. A rehearsal on
 the team's four physical machines is still required. Each person can do the
