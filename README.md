@@ -1,162 +1,190 @@
-# 18-749 Milestone 2
+# 18-749 Milestone 3: Passive Replication
 
-Active replication using the existing Python/WebSocket application. This repository
-contains the replica, the new GFD, tests, and the launch helper. Keep the `server`,
-`client`, and `LFD` repositories in sibling folders.
+This version is intentionally limited to the Milestone 3 rubric:
 
-For repository setup, testing, and the rehearsal sequence, follow
-[the step-by-step demo guide](DEMO_GUIDE.md).
+- S1 is the primary.
+- S2 and S3 are backups.
+- Clients connect to all three replicas but send requests only to S1.
+- S1 sends periodic checkpoints to S2 and S3.
+- During the demo, kill S2 and then S3. Do not kill S1.
+- There is no Replication Manager, primary failover, or recovery in Milestone 3.
 
-## Quick start
+Keep the `server`, `client`, and `LFD` folders beside each other. Run every
+command below from the folder that contains all three folders.
 
-From the folder containing those three folders, with Python 3.10 or newer:
+## First-time setup
 
-```text
-python server/demo.py setup
-python server/demo.py test
+Run this once on every laptop:
+
+```sh
+python3 server/demo.py setup
 ```
 
-On macOS/Linux, use `python3` if `python` is unavailable. Setup creates a local
-`.venv`; activation is not needed. The test starts local processes, injects faults,
-writes `server/test-results/report.json` and logs, and stops its own processes.
-It does not contact the team's Vultr server. Dependencies are pinned to the versions
-used during development. Python 3.13.2 on Windows was used for verification.
+Before the professor demo, run the automatic local test:
 
-## Four-machine demonstration
-
-The project guide says the replicas must be on three different physical machines.
-Use three teammate laptops for S1/LFD1, S2/LFD2, S3/LFD3 and a fourth laptop for the
-GFD and C1/C2/C3. VMs or containers on one laptop are useful for development but do
-not provide that physical separation. Ask the TA before substituting cloud VMs.
-
-Each machine gets the same three folders and runs setup once. Keep every process
-in its own terminal. All commands below are run from the common parent folder.
-Replace `GFD_IP` and `S1_IP` / `S2_IP` / `S3_IP` with actual reachable IPv4 addresses.
-`127.0.0.1` on the LFD-to-replica link is intentional: those two run on the same laptop.
-
-Network paths needed:
-
-- LFD laptops -> coordinator TCP 9000.
-- Coordinator -> each replica laptop TCP 8001.
-- Use a network that permits laptop-to-laptop traffic. Being on the same Wi-Fi
-  does not by itself prove reachability. Allow these Python connections/ports if
-  the host firewall prompts; do not disable the whole firewall.
-- Keep all four machines awake and plugged in during the demo.
-
-Start in the rubric's order:
-
-1. **Coordinator terminal 1:** `python server/demo.py gfd`
-   Expect `GFD: 0 members`.
-2. **Laptop S1, terminal 1:**
-   `python server/demo.py lfd1 --gfd-host GFD_IP --replica-host S1_IP`
-   Run equivalent commands with `lfd2`/`S2_IP` and `lfd3`/`S3_IP` on the other laptops.
-   Expect LFD registration and GFD/LFD heartbeat logs; no replicas are members yet.
-3. **Laptop S1, terminal 2:** `python server/demo.py s1`
-   Then `python server/demo.py s2` on laptop S2 and `python server/demo.py s3` on S3.
-   Expect GFD membership to grow 0 -> 1 -> 2 -> 3 after successful local heartbeats.
-4. **Coordinator:** verify each laptop with
-   `python server/demo.py check --replica-host S1_IP` (repeat for S2_IP and S3_IP).
-5. **Coordinator terminals 2, 3, 4:** run respectively:
-   `python server/demo.py c1`, `python server/demo.py c2`, `python server/demo.py c3`.
-   Launch clients only after all three replicas appear at the GFD.
-
-For one-laptop practice, add `--local` to each replica and LFD command, and omit
-the IP flags. This uses replica ports 8001, 8002, 8003 on loopback. The automated
-test uses its own available ports, so it will not kill an existing manual demo.
-
-## Demo checklist
-
-- [ ] GFD starts with zero members; three LFDs register before replicas start.
-- [ ] GFD-to-LFD and LFD-to-server heartbeats are visible, with configurable intervals.
-- [ ] Membership grows as S1, S2, S3 start; each client receives the full membership.
-- [ ] Each client sends the same numbered request to all healthy replicas before
-      moving to its next request. Requests and replies identify client/replica/number.
-- [ ] All replicas process the same global order and print state before/after.
-- [ ] Each client delivers only the first reply and logs late duplicates.
-- [ ] Press Ctrl+C **only in S1's server terminal**. Keep LFD1 alive. Watch LFD1
-      report the fault, GFD change to S2/S3, and every client continue.
-- [ ] After the system settles, press Ctrl+C only in S2's server terminal.
-      Watch membership become S3 and all clients continue, now without replica duplicates.
-- [ ] Explain the assumptions and limitations below.
-
-To repeat a clean demo, stop clients, LFDs, replicas, and GFD, then restart all of
-them in the above order. Restarting one replica with an empty state during traffic
-is deliberately rejected; recovery/state transfer belongs to later milestones.
-
-## Design and protocol
-
-The GFD maintains `membership[]`, a membership version, and a run epoch. Each LFD
-registers a replica's externally reachable WebSocket URL, answers GFD heartbeats,
-and reports add/delete transitions based on local replica heartbeats. GFD loss of
-an LFD also removes its replica. A replica boot ID prevents accidental admission
-of a fresh empty-state process after requests have begun.
-
-The GFD additionally assigns a monotonically increasing `global_seq` to each
-`(client_id, request_num)`. This is an explicit sequencing role co-located with the
-already-allowed unreplicated GFD. It does not execute the application or relay
-application replies: clients still send requests directly to all replicas.
-TCP orders each connection, not the interleaving of different clients' connections,
-so replicas buffer out-of-order requests until the missing sequence arrives.
-This gives the counter the same state/result for a request at every replica.
-
-Client sending and receiving are independent for each replica. The first reply is
-delivered immediately. Late replies are matched by the reply's actual request ID,
-validated, then discarded. Unacknowledged requests are replayed after a connection
-loss. Replicas cache their original result to prevent a lost reply from causing a
-second state update. An identical request retried at the GFD gets the same sequence.
-
-Control messages:
-
-| Connection | Messages |
-| --- | --- |
-| LFD -> GFD `/ws/lfd/LFD1` | `register {replica_id,url}`, `status {alive,boot_id}`, `heartbeat_reply {heartbeat_count}` |
-| GFD -> LFD | `heartbeat {heartbeat_count}` |
-| Client -> GFD `/ws/client/C1` | `order {request_num,payload}` |
-| GFD -> client | `membership {epoch,version,members}`, `ordered {epoch,global_seq,client_id,request_num,payload}` |
-| Client -> replica `/ws/client/C1` | The same ordered message to each replica |
-| Replica -> client | `reply {epoch,global_seq,client_id,replica_id,request_num,my_state}` |
-
-`GET /health` on the GFD/replicas is a read-only diagnostics endpoint.
-The original single-server mode remains available via `server.py --mode standalone`
-and `client.py --server_url ws://HOST:8001`; LFD without `--gfd_url` monitors locally.
-
-## Scope and tradeoffs to explain
-
-- GFD and clients must remain alive for the demo; GFD/sequencer is an accepted
-  single point of failure. Global sequencing adds a coordinator round trip.
-- Client IDs are unique for a run. Restart the entire demo after a client or GFD
-  process restart; durable sessions, leader election, and GFD recovery are not implemented.
-- All replicas start before client traffic. Fresh replica recovery, checkpointing,
-  passive replication, and the RM are not part of this milestone.
-- The demo keeps request/reply history in memory. This is not an indefinitely
-  running production service: there is no durable storage or history compaction.
-- A client crash after receiving a sequence can leave a sequence gap. Client
-  crashes are outside the stated replica-crash demo model.
-- Local tests prove behavior of separate processes. They do not verify the physical
-  machines, firewall rules, latency, or reachability of the final deployment.
-
-## Rollback and Git
-
-Each repository has an annotated local tag `milestone-1-complete` preserving its
-original baseline. Implementation work is on `milestone-2`, leaving the
-original `master` commit available. From each clean repository, inspect the old code
-with `git switch --detach milestone-1-complete`; return with `git switch milestone-2`.
-This changes your checkout; it does not restart or redeploy running services.
-
-Publishing commands, once the authenticated GitHub account has write access:
-
-```text
-git -C server push origin refs/tags/milestone-1-complete milestone-2
-git -C client push origin refs/tags/milestone-1-complete milestone-2
-git -C LFD push origin refs/tags/milestone-1-complete milestone-2
+```sh
+python3 server/demo.py test
 ```
 
-## Source requirements
+A successful run ends with `"result": "PASS"`.
 
-- [Project guide](https://docs.google.com/document/d/1Ak8UT_oD9V5kxCQ8wkgjq97D_UdT3qHRVV6i9AHLKpc/edit)
-- [Course schedule](https://docs.google.com/spreadsheets/d/1HFqoqMS9RamaIfHLtqAw5monMa05wvpGFIufjhBhH58/edit)
-- [Team demo signup](https://docs.google.com/spreadsheets/d/1lLYHtFg4-KPqx2E1SUj30aR6QpuRMs0o-C4Lq9ZZsjk/edit)
+## Who runs what
 
-As checked September 28, 2026: Milestone 2 is September 30 and Team 18 is listed at
-6:15 p.m. This implementation follows the detailed checklist's two sequential
-replica crashes (3 -> 2 -> 1), despite the shorter goals mentioning one crash.
+You need four laptops for the official layout.
+
+- **Coordinator laptop:** GFD, C1, C2, and C3.
+- **S1 laptop:** LFD1 and primary replica S1.
+- **S2 laptop:** LFD2 and backup replica S2.
+- **S3 laptop:** LFD3 and backup replica S3.
+
+Write down these four IP addresses before starting:
+
+```text
+GFD_IP = coordinator laptop
+S1_IP  = S1 laptop
+S2_IP  = S2 laptop
+S3_IP  = S3 laptop
+```
+
+Every command below needs its own terminal window.
+
+## Commands for the four-laptop demo
+
+Start the components in this exact order.
+
+### 1. Coordinator laptop
+
+Terminal 1:
+
+```sh
+python3 server/demo.py gfd
+```
+
+Wait until it prints `GFD: 0 members`.
+
+### 2. S1 laptop
+
+Terminal 1:
+
+```sh
+python3 server/demo.py lfd1 --gfd-host GFD_IP --replica-host S1_IP
+```
+
+### 3. S2 laptop
+
+Terminal 1:
+
+```sh
+python3 server/demo.py lfd2 --gfd-host GFD_IP --replica-host S2_IP
+```
+
+### 4. S3 laptop
+
+Terminal 1:
+
+```sh
+python3 server/demo.py lfd3 --gfd-host GFD_IP --replica-host S3_IP
+```
+
+Wait until all three LFDs have registered with the GFD.
+
+### 5. Start S1, the primary
+
+On the S1 laptop, Terminal 2:
+
+```sh
+python3 server/demo.py s1 --backup-host S2_IP --backup-host S3_IP --checkpoint 2
+```
+
+### 6. Start S2 and S3, the backups
+
+On the S2 laptop, Terminal 2:
+
+```sh
+python3 server/demo.py s2
+```
+
+On the S3 laptop, Terminal 2:
+
+```sh
+python3 server/demo.py s3
+```
+
+The GFD should print membership changing from 0 to 1 to 2 to 3. S1 should print
+that its checkpoint channels connected to S2 and S3. S2 and S3 should repeatedly
+print `Received checkpoint` with `my_state` and `checkpoint_count`.
+
+### 7. Start all three clients
+
+On the coordinator laptop, Terminals 2, 3, and 4:
+
+```sh
+python3 server/demo.py c1 --gfd-host GFD_IP
+```
+
+```sh
+python3 server/demo.py c2 --gfd-host GFD_IP
+```
+
+```sh
+python3 server/demo.py c3 --gfd-host GFD_IP
+```
+
+Each client should say it connected to S1, S2, and S3. Requests and replies must
+name only S1 because S1 is the primary. S2 and S3 receive checkpoints but do not
+process client requests.
+
+## What to do during the professor demo
+
+1. Show GFD membership containing S1, S2, and S3.
+2. Show C1, C2, and C3 continuously receiving replies from S1.
+3. Show S1 sending checkpoints and S2/S3 receiving them.
+4. Press Ctrl+C only in the **S2 server terminal**. Leave LFD2 running.
+5. Show LFD2 detecting the fault and GFD membership becoming S1, S3.
+6. Show all clients continuing to receive replies from S1.
+7. Show S1 continuing to send checkpoints to S3.
+8. Press Ctrl+C only in the **S3 server terminal**. Leave LFD3 running.
+9. Show membership becoming S1 and all clients continuing normally.
+
+Do not stop S1. Primary failure and recovery are outside Milestone 3.
+
+## One-laptop practice
+
+Open ten terminals and run these commands in order:
+
+```sh
+python3 server/demo.py gfd
+python3 server/demo.py lfd1 --local
+python3 server/demo.py lfd2 --local
+python3 server/demo.py lfd3 --local
+python3 server/demo.py s1 --local --checkpoint 2
+python3 server/demo.py s2 --local
+python3 server/demo.py s3 --local
+python3 server/demo.py c1
+python3 server/demo.py c2
+python3 server/demo.py c3
+```
+
+Each line still needs its own terminal. In local mode, S1/S2/S3 use ports
+8001/8002/8003 on the same laptop.
+
+## What each source file does
+
+- `gfd.py`: tracks live replicas, publishes membership, and orders requests.
+- `passive_server.py`: runs S1 as primary or S2/S3 as backups and checkpoints.
+- `../client/client.py`: connects to all replicas and sends only to S1.
+- `../LFD/lfd.py`: heartbeats one local replica and reports add/delete events.
+- `tests/milestone3_demo.py`: runs the complete Milestone 3 scenario locally.
+
+## Network ports
+
+- GFD uses TCP port 9000 on the coordinator laptop.
+- Every replica uses TCP port 8001 on its own laptop.
+- LFD-to-replica heartbeat traffic stays on the same replica laptop.
+- S1 must be able to reach S2 and S3 on port 8001.
+- The coordinator must be able to reach S1, S2, and S3 on port 8001.
+
+Keep all laptops awake and plugged in. If a connection fails, first check the IP
+addresses, the host firewall, and whether all machines are on the same network.
+
+No code has been pushed to GitHub. Review and push it yourself when ready.
