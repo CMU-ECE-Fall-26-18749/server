@@ -1,4 +1,4 @@
-"""Start one Milestone 3 component with a short command."""
+"""Start one replication component with a short command."""
 
 import argparse
 import json
@@ -19,10 +19,12 @@ VENV_PYTHON = ROOT / ".venv" / (
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("component", choices=[
-        "setup", "test", "check", "gfd",
+        "setup", "test", "check", "rm", "gfd",
         "lfd1", "lfd2", "lfd3", "s1", "s2", "s3", "c1", "c2", "c3",
     ])
     parser.add_argument("--gfd-host", default="127.0.0.1")
+    parser.add_argument("--mode", choices=["active", "passive", "milestone-3"],
+                        default="passive")
     parser.add_argument("--replica-host", default="127.0.0.1")
     parser.add_argument("--backup-host", action="append", default=[])
     parser.add_argument("--local", action="store_true")
@@ -50,8 +52,10 @@ def main():
         parser.error("Run: python3 server/demo.py setup")
 
     if args.component == "test":
+        name = ("milestone3_demo.py" if args.mode == "milestone-3"
+                else "milestone4_demo.py")
         subprocess.run([
-            str(VENV_PYTHON), str(SERVER / "tests" / "milestone3_demo.py"),
+            str(VENV_PYTHON), str(SERVER / "tests" / name),
         ], check=True)
         return
 
@@ -69,16 +73,21 @@ def main():
         return
 
     role = args.component
-    local_port = 8000 + int(role[-1]) if args.local and role != "gfd" else 8001
+    local_port = 8000 + int(role[-1]) if args.local and role[-1].isdigit() else 8001
     gfd_url = f"ws://{args.gfd_host}:9000"
 
-    if role == "gfd":
+    if role == "rm":
+        script = SERVER / "rm.py"
+        flags = []
+    elif role == "gfd":
         script = SERVER / "gfd.py"
         flags = [
             "--host", "0.0.0.0",
             "--heartbeat_freq", args.heartbeat,
             "--timeout", args.timeout,
         ]
+        if args.mode != "milestone-3":
+            flags += ["--mode", args.mode, "--rm_url", "ws://127.0.0.1:9001"]
     elif role.startswith("lfd"):
         number = role[-1]
         script = ROOT / "LFD" / "lfd.py"
@@ -90,6 +99,16 @@ def main():
             "--gfd_url", gfd_url,
             "--heartbeat_freq", args.heartbeat,
             "--timeout", args.timeout,
+        ]
+    elif role.startswith("s") and args.mode != "milestone-3":
+        script = SERVER / "replica.py"
+        flags = [
+            "--replica_id", role.upper(),
+            "--host", "0.0.0.0",
+            "--port", local_port,
+            "--mode", args.mode,
+            "--gfd_url", gfd_url,
+            "--checkpoint_interval", args.checkpoint,
         ]
     elif role.startswith("s"):
         number = role[-1]
@@ -109,6 +128,9 @@ def main():
             for host in backup_hosts:
                 flags += ["--backup_url", f"ws://{host}"]
     else:
+        if args.mode == "active":
+            parser.error("the current client checkout only supports S1; "
+                         "use the Milestone 4 protocol test for active mode")
         script = ROOT / "client" / "client.py"
         flags = [
             "--client_id", role.upper(),
